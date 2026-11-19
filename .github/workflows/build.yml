@@ -1,62 +1,83 @@
-name: Build APK from ZIP
+name: Build Android APK (from rustchat.zip)
 
 on:
   push:
-    branches: [ main, master ]
+    branches: [main]
+  release:
+    types: [published]
   workflow_dispatch:
 
 jobs:
   build:
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
 
-      - name: Extract Source ZIP
+      - name: Extract rustchat.zip
         run: |
-          unzip -o "*.zip" -d .
-          if [ ! -f "Cargo.toml" ]; then
-            SUBDIR=$(find . -maxdepth 2 -name "Cargo.toml" -printf "%h\n" | head -n 1)
-            [ -n "$SUBDIR" ] && cp -rf "$SUBDIR"/* .
-          fi
+          test -f rustchat.zip || { echo "rustchat.zip tidak ada di root repo"; exit 1; }
+          rm -rf work && mkdir work
+          unzip -q rustchat.zip -d work
+          ls work/rustchat
 
-      - uses: actions/setup-java@v4
+      - name: Setup JDK 17
+        uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: 17
+          java-version: "17"
 
-      - uses: android-actions/setup-android@v3
-
-      - name: Install Android NDK & SDK 34
-        run: sdkmanager "ndk;26.3.11579264" "build-tools;34.0.0" "platforms;android-34"
-
-      - uses: dtolnay/rust-toolchain@stable
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
         with:
           targets: aarch64-linux-android,armv7-linux-androideabi
 
-      - uses: taiki-e/install-action@cargo-ndk
-
-      - name: Compile Rust Core
-        run: |
-          export ANDROID_NDK_HOME=$ANDROID_HOME/ndk/26.3.11579264
-          cargo ndk -t arm64-v8a -t armeabi-v7a -o app/src/main/jniLibs build --release
-
-      - name: Generate Keystore
-        run: |
-          keytool -genkeypair -v -keystore app/release.keystore \
-            -alias rustchat -keyalg RSA -keysize 2048 -validity 10000 \
-            -storepass rustchat123 -keypass rustchat123 \
-            -dname "CN=RustChat, OU=Dev, O=Lite, L=ID, ST=ID, C=ID"
-
-      - uses: gradle/actions/setup-gradle@v4
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
         with:
-          gradle-version: '8.7'
+          workspaces: work/rustchat/rust
 
-      - name: Build & Pack APK
-        run: |
-          gradle assembleRelease
-          zip -j RustChat-Android-APK.zip app/build/outputs/apk/release/app-release.apk
-
-      - uses: actions/upload-artifact@v4
+      - name: Install cargo-ndk
+        uses: taiki-e/install-action@v2
         with:
-          name: RustChat-Android-APK
-          path: RustChat-Android-APK.zip
+          tool: cargo-ndk
+
+      - name: Build native engine (arm64-v8a, armeabi-v7a)
+        working-directory: work/rustchat/rust
+        run: >
+          cargo ndk --platform 24
+          -t arm64-v8a -t armeabi-v7a
+          -o ../app/src/main/jniLibs
+          build --release
+
+      - name: Generate release keystore
+        working-directory: work/rustchat
+        run: >
+          keytool -genkeypair -v -keystore app/release.keystore
+          -alias rustchat -keyalg RSA -keysize 2048 -validity 10000
+          -storepass rustchat123 -keypass rustchat123
+          -dname "CN=RustChat, OU=Dev, O=Lite, L=ID, ST=ID, C=ID"
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.9"
+
+      - name: Build release APK
+        working-directory: work/rustchat
+        run: gradle assembleRelease --no-daemon --stacktrace
+
+      - name: Package app-release.zip
+        working-directory: work/rustchat
+        run: |
+          mkdir -p dist/native-libs
+          cp app/build/outputs/apk/release/*.apk dist/
+          cp -r app/src/main/jniLibs/. dist/native-libs/
+          (cd dist && zip -r ../app-release.zip .)
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: app-release
+          path: work/rustchat/app-release.zip
+          if-no-files-found: error
