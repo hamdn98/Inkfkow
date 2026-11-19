@@ -1,0 +1,80 @@
+name: Build RustChat APK
+
+on:
+  push:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Extract rustchat ZIP terbaru
+        run: |
+          ZIP_FILE=$(ls -t rustchat*.zip 2>/dev/null | head -n 1)
+          test -n "$ZIP_FILE" || { echo "File rustchat*.zip nggak ketemu di root repo"; exit 1; }
+          echo "Mengekstrak $ZIP_FILE..."
+          rm -rf rustchat
+          unzip -q "$ZIP_FILE"
+
+      - name: Setup JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android,armv7-linux-androideabi
+
+      - name: Cache Cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            rustchat/rust/target/
+          key: ${{ runner.os }}-cargo-rustchat-${{ hashFiles('rustchat/rust/Cargo.toml') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-rustchat-
+
+      - name: Install cargo-ndk
+        run: cargo install cargo-ndk --locked
+
+      - name: Build native engine (arm64-v8a, armeabi-v7a)
+        working-directory: rustchat/rust
+        run: cargo ndk -t arm64-v8a -t armeabi-v7a -o ../app/src/main/jniLibs build --release
+
+      - name: Generate release keystore
+        run: |
+          keytool -genkey -v \
+            -keystore rustchat/app/release.keystore \
+            -alias rustchat \
+            -keyalg RSA \
+            -keysize 2048 \
+            -validity 10000 \
+            -storepass rustchat123 \
+            -keypass rustchat123 \
+            -dname "CN=RustChat, OU=Dev, O=Lite, L=ID, ST=ID, C=ID"
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.7'
+
+      - name: Build release APK
+        working-directory: rustchat
+        run: gradle assembleRelease --no-daemon
+
+      - name: Upload APK hasil build
+        uses: actions/upload-artifact@v4
+        with:
+          name: RustChat-release-apk
+          path: rustchat/app/build/outputs/apk/release/app-release.apk
