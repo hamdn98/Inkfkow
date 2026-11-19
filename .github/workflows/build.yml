@@ -1,75 +1,62 @@
-name: Build Android APK (from inkflow.zip)
+name: Build APK from ZIP
 
 on:
   push:
-    branches: [main]
-  release:
-    types: [published]
+    branches: [ main, master ]
   workflow_dispatch:
 
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
 
-      - name: Extract inkflow.zip
+      - name: Extract Source ZIP
         run: |
-          test -f inkflow.zip || { echo "inkflow.zip tidak ada di root repo"; exit 1; }
-          rm -rf work && mkdir work
-          unzip -q inkflow.zip -d work
-          ls work/inkflow
+          unzip -o "*.zip" -d .
+          if [ ! -f "Cargo.toml" ]; then
+            SUBDIR=$(find . -maxdepth 2 -name "Cargo.toml" -printf "%h\n" | head -n 1)
+            [ -n "$SUBDIR" ] && cp -rf "$SUBDIR"/* .
+          fi
 
-      - name: Setup JDK 17
-        uses: actions/setup-java@v4
+      - uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: "17"
+          java-version: 17
 
-      - name: Setup Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+      - uses: android-actions/setup-android@v3
+
+      - name: Install Android NDK & SDK 34
+        run: sdkmanager "ndk;26.3.11579264" "build-tools;34.0.0" "platforms;android-34"
+
+      - uses: dtolnay/rust-toolchain@stable
         with:
           targets: aarch64-linux-android,armv7-linux-androideabi
 
-      - name: Cache cargo
-        uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: work/inkflow/rust
+      - uses: taiki-e/install-action@cargo-ndk
 
-      - name: Install cargo-ndk
-        uses: taiki-e/install-action@v2
-        with:
-          tool: cargo-ndk
-
-      - name: Build native engine (arm64-v8a, armeabi-v7a)
-        working-directory: work/inkflow/rust
-        run: >
-          cargo ndk --platform 29
-          -t arm64-v8a -t armeabi-v7a
-          -o ../app/src/main/jniLibs
-          build --release
-
-      - name: Setup Gradle
-        uses: gradle/actions/setup-gradle@v4
-        with:
-          gradle-version: "8.9"
-
-      - name: Build release APK
-        working-directory: work/inkflow
-        run: gradle assembleRelease --no-daemon --stacktrace
-
-      - name: Package app-release.zip
-        working-directory: work/inkflow
+      - name: Compile Rust Core
         run: |
-          mkdir -p dist/native-libs
-          cp app/build/outputs/apk/release/*.apk dist/
-          cp -r app/src/main/jniLibs/. dist/native-libs/
-          (cd dist && zip -r ../app-release.zip .)
+          export ANDROID_NDK_HOME=$ANDROID_HOME/ndk/26.3.11579264
+          cargo ndk -t arm64-v8a -t armeabi-v7a -o app/src/main/jniLibs build --release
 
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
+      - name: Generate Keystore
+        run: |
+          keytool -genkeypair -v -keystore app/release.keystore \
+            -alias rustchat -keyalg RSA -keysize 2048 -validity 10000 \
+            -storepass rustchat123 -keypass rustchat123 \
+            -dname "CN=RustChat, OU=Dev, O=Lite, L=ID, ST=ID, C=ID"
+
+      - uses: gradle/actions/setup-gradle@v4
         with:
-          name: app-release
-          path: work/inkflow/app-release.zip
-          if-no-files-found: error
+          gradle-version: '8.7'
+
+      - name: Build & Pack APK
+        run: |
+          gradle assembleRelease
+          zip -j RustChat-Android-APK.zip app/build/outputs/apk/release/app-release.apk
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: RustChat-Android-APK
+          path: RustChat-Android-APK.zip
